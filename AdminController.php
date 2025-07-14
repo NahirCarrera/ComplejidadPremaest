@@ -2,358 +2,208 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\User;
+use App\Models\Subject;
+use App\Models\RegistrationPeriod;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use App\Models\RegistrationPeriod;
-use App\Models\User;
-use App\Models\Subject;
-use Illuminate\Validation\Rule;
-use Spatie\Permission\Models\Role;
-class AdminController extends Controller
+use Illuminate\Support\Facades\Storage;
+use App\Models\ApprovedSubject;
+class StudentController extends Controller
 {
-
+    /**
+     * Dashboard principal del estudiante
+     */
     public function dashboard()
     {
+        $user = Auth::user();
         $currentPeriod = RegistrationPeriod::latest('start_date')->first();
-        
-        // 1. Totalidad de estudiantes
-        $studentRoleId = Role::where('name', 'student')->value('id');
-        $studentsCount = DB::table('users')
-            ->join('model_has_roles', 'users.id', '=', 'model_has_roles.model_id')
-            ->where('model_has_roles.role_id', $studentRoleId)
-            ->count();
 
-        // 2. Estudiantes que planificaron (para el período actual)
-        $activeEnrollments = $currentPeriod 
+        // Asignaturas aprobadas
+        $approvedCount = ApprovedSubject::where('student_id', $user->id)->count();
+        $approvedCredits = ApprovedSubject::where('student_id', $user->id)
+            ->join('subjects', 'approved_subjects.subject_id', '=', 'subjects.subject_id')
+            ->sum('subjects.credits');
+
+        // Asignaturas planificadas (para el período actual si existe)
+        $plannedCount = $currentPeriod 
             ? DB::table('planned_subjects')
+                ->where('student_id', $user->id)
                 ->where('period_id', $currentPeriod->period_id)
-                ->distinct('student_id')
-                ->count('student_id')
+                ->count()
             : 0;
+            //sumar el valor del atributo credits de todas las asignaturas existentes en la tabla subjects
+            //para calcular el total de creditos
 
-        // 3. Total de asignaturas
-        $subjectsCount = Subject::count();
+        $totalCredits = $currentPeriod 
+            ? DB::table('subjects')
+                ->sum('subjects.credits')
+            : 0;
+        $pendingCredits = max(0, $totalCredits - $approvedCredits);
+        $progressPercentage = $totalCredits > 0 ? round(($approvedCredits / $totalCredits) * 100) : 0;
 
-        // 4. Asignaturas con mayor y menor demanda por nivel
-        $demandByLevel = Subject::select(
-                'level',
-                DB::raw('COUNT(subjects.subject_id) as total_subjects'),
-                DB::raw('SUM(CASE WHEN ps.student_count IS NULL THEN 0 ELSE ps.student_count END) as total_enrollments'),
-                DB::raw('MAX(ps.student_count) as max_demand'),
-                DB::raw('MIN(COALESCE(ps.student_count, 0)) as min_demand')
-            )
-            ->leftJoin(DB::raw('(SELECT subject_id, COUNT(student_id) as student_count 
-                                FROM planned_subjects 
-                                WHERE period_id = '.($currentPeriod ? $currentPeriod->period_id : 'NULL').'
-                                GROUP BY subject_id) as ps'), 
-                'subjects.subject_id', '=', 'ps.subject_id')
-            ->groupBy('level')
-            ->orderBy('level')
-            ->get();
-
-        // 5. Asignaturas sin demanda
-        $noDemandSubjects = Subject::leftJoin('planned_subjects', function($join) use ($currentPeriod) {
-                $join->on('subjects.subject_id', '=', 'planned_subjects.subject_id')
-                    ->when($currentPeriod, function($query) use ($currentPeriod) {
-                        $query->where('planned_subjects.period_id', $currentPeriod->period_id);
-                    });
-            })
-            ->whereNull('planned_subjects.subject_id')
-            ->count();
-
-        // 6. Variación de demanda respecto a períodos anteriores
-        $enrollmentTrend = RegistrationPeriod::select(
-                'registration_periods.period_id',
-                'registration_periods.code',
-                DB::raw('COUNT(DISTINCT planned_subjects.student_id) as enrollment_count')
-            )
-            ->leftJoin('planned_subjects', 'registration_periods.period_id', '=', 'planned_subjects.period_id')
-            ->groupBy('registration_periods.period_id', 'registration_periods.code')
-            ->orderBy('registration_periods.start_date', 'desc')
-            ->limit(5)
-            ->get()
-            ->reverse()
-            ->values();
-
-        // 7. Promedio de créditos tomados por los estudiantes
-        $averageCredits = $currentPeriod 
-            ? DB::table('planned_subjects')
-                ->select(DB::raw('AVG(subjects.credits) as avg_credits'))
-                ->join('subjects', 'planned_subjects.subject_id', '=', 'subjects.subject_id')
-                ->where('planned_subjects.period_id', $currentPeriod->period_id)
-                ->groupBy('planned_subjects.student_id')
-                ->first()
-            : null;
-
-        // 8. Asignaturas más populares (para el gráfico)
-        $popularSubjects = Subject::select(
-                'subjects.subject_id',
-                'subjects.code',
-                'subjects.name',
-                'subjects.level',
-                DB::raw('COUNT(planned_subjects.student_id) as student_count')
-            )
-            ->leftJoin('planned_subjects', function($join) use ($currentPeriod) {
-                $join->on('subjects.subject_id', '=', 'planned_subjects.subject_id')
-                    ->when($currentPeriod, function($query) use ($currentPeriod) {
-                        $query->where('planned_subjects.period_id', $currentPeriod->period_id);
-                    });
-            })
-            ->groupBy('subjects.subject_id', 'subjects.code', 'subjects.name', 'subjects.level')
-            ->orderByDesc('student_count')
-            ->limit(10)
-            ->get();
-
-        // Preparar datos para gráficos
-        $chartSubjects = $popularSubjects->pluck('code');
-        $chartEnrollments = $popularSubjects->pluck('student_count');
-        $trendLabels = $enrollmentTrend->pluck('code');
-        $trendData = $enrollmentTrend->pluck('enrollment_count');
-
-        // Obtener todos los periodos para el filtro
-        $allPeriods = RegistrationPeriod::orderBy('start_date', 'desc')->get();
-
-        return view('admin.dashboard', [
+        return view('student.dashboard', [
+            'approvedCount' => $approvedCount,
+            'plannedCount' => $plannedCount,
+            'approvedCredits' => $approvedCredits,
             'currentPeriod' => $currentPeriod,
-            'studentsCount' => $studentsCount,
-            'activeEnrollments' => $activeEnrollments,
-            'subjectsCount' => $subjectsCount,
-            'demandByLevel' => $demandByLevel,
-            'noDemandSubjects' => $noDemandSubjects,
-            'enrollmentTrend' => $enrollmentTrend,
-            'averageCredits' => $averageCredits ? round($averageCredits->avg_credits, 2) : 0,
-            'popularSubjects' => $popularSubjects,
-            'chartSubjects' => $chartSubjects,
-            'chartEnrollments' => $chartEnrollments,
-            'trendLabels' => $trendLabels,
-            'trendData' => $trendData,
-            'allPeriods' => $allPeriods
+            'totalCredits' => $totalCredits,
+            'pendingCredits' => $pendingCredits,
+            'progressPercentage' => $progressPercentage
         ]);
     }
-    public function index()
+
+
+    /**
+     * Mostrar formulario para subir record académico
+     */
+    public function showUploadRecordForm()
     {
-        $periods = RegistrationPeriod::orderBy('start_date', 'desc')->paginate(10);
-        return view('admin.periods.index', compact('periods'));
+        $periods = RegistrationPeriod::orderBy('start_date', 'desc')->get();
+        $currentPeriod = $this->getCurrentPeriod();
+        
+        return view('student.records.upload', compact('periods', 'currentPeriod'));
     }
 
-    public function create()
+    /**
+     * Detecta el binario de Python disponible en el sistema.
+     */
+    protected function getPythonBinary(): string
     {
-        return view('admin.periods.create');
-    }
-
-    public function store(Request $request)
-    {
-        $validated = $request->validate([
-            'code' => 'required|string|max:45|unique:registration_periods,code',
-            'start_date' => 'required|date',
-            'end_date' => 'required|date|after:start_date',
-        ]);
-
-        RegistrationPeriod::create([
-            'code' => $validated['code'],
-            'start_date' => $validated['start_date'],
-            'end_date' => $validated['end_date'],
-            'admin_id' => Auth::id()
-        ]);
-
-        return redirect()->route('admin.periods.index')
-            ->with('success', 'Período académico creado exitosamente');
-    }
-
-    public function edit(RegistrationPeriod $period)
-    {
-        return view('admin.periods.edit', compact('period'));
-    }
-
-    public function update(Request $request, RegistrationPeriod $period)
-    {
-        $validated = $request->validate([
-            'code' => [
-                'required',
-                'string',
-                'max:45',
-                Rule::unique('registration_periods')->ignore($period->period_id, 'period_id')
-            ],
-            'start_date' => 'required|date',
-            'end_date' => 'required|date|after:start_date',
-        ]);
-
-        $period->update($validated);
-
-        return redirect()->route('admin.periods.index')
-            ->with('success', 'Período académico actualizado exitosamente');
-    }
-
-    public function destroy(RegistrationPeriod $period)
-    {
-        // Verificar si hay registros asociados antes de eliminar
-        if ($period->approvedSubjects()->exists() || $period->plannedSubjects()->exists()) {
-            return back()->with('error', 'No se puede eliminar el período porque tiene registros asociados');
+        // Windows: Intenta con 'python' o la ruta común
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $possiblePaths = [
+                'python',               // Alias general
+                'py',                   // Launcher de Windows
+                'C:\\Python39\\python.exe', // Ruta común 1
+                'C:\\Python310\\python.exe', // Ruta común 2
+                env('PYTHON_PATH')     // Desde .env (opcional)
+            ];
+        } 
+        // Linux/macOS
+        else {
+            $possiblePaths = ['python3', 'python'];
         }
 
-        $period->delete();
+        foreach ($possiblePaths as $path) {
+            $testCommand = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' 
+                ? "where {$path}"
+                : "which {$path}";
 
-        return redirect()->route('admin.periods.index')
-            ->with('success', 'Período académico eliminado exitosamente');
-    }
-    public function subjectsDemand(Request $request)
-{
-    $currentPeriod = $this->getCurrentPeriod();
-    $levels = Subject::select('level')->distinct()->orderBy('level')->pluck('level');
-    
-    $selectedLevel = $request->input('level');
-    
-    // Definir umbrales directamente
-    $lowDemandThreshold = 5;  // Umbral para baja demanda
-    $highDemandThreshold = 15; // Umbral para alta demanda
-    
-    // Main subjects query
-    $subjectsQuery = Subject::select(
-            'subjects.*', 
-            'subjects_demand.student_count'
-        )
-        ->leftJoin('subjects_demand', function($join) use ($currentPeriod) {
-            $join->on('subjects.subject_id', '=', 'subjects_demand.subject_id')
-                ->when($currentPeriod, function($query) use ($currentPeriod) {
-                    $query->where('subjects_demand.period_id', $currentPeriod->period_id);
-                });
-        })
-        ->when($selectedLevel, function($query) use ($selectedLevel) {
-            return $query->where('subjects.level', $selectedLevel);
-        })
-        ->orderBy('subjects_demand.student_count', 'desc');
-    
-    // Get paginated results
-    $subjects = $subjectsQuery->paginate(15);
-    
-    // Additional statistics
-    $maxDemand = $subjectsQuery->clone()
-        ->max('subjects_demand.student_count') ?? 0;
-    
-    $mostDemandedSubject = $subjectsQuery->clone()
-        ->orderBy('subjects_demand.student_count', 'desc')
-        ->first();
-    
-    $zeroDemandCount = Subject::whereNotIn('subjects.subject_id', function($query) use ($currentPeriod) {
-            $query->select('subject_id')
-                ->from('subjects_demand')
-                ->when($currentPeriod, function($query) use ($currentPeriod) {
-                    $query->where('period_id', $currentPeriod->period_id);
-                });
-        })
-        ->when($selectedLevel, function($query) use ($selectedLevel) {
-            return $query->where('level', $selectedLevel);
-        })
-        ->count();
-    
-    // Clasificar asignaturas por nivel de demanda usando los umbrales definidos
-    $lowDemandCount = Subject::whereHas('demand', function($query) use ($currentPeriod, $lowDemandThreshold) {
-            $query->when($currentPeriod, function($q) use ($currentPeriod) {
-                $q->where('period_id', $currentPeriod->period_id);
-            })
-            ->where('student_count', '>', 0)
-            ->where('student_count', '<', $lowDemandThreshold);
-        })
-        ->when($selectedLevel, function($query) use ($selectedLevel) {
-            return $query->where('level', $selectedLevel);
-        })
-        ->count();
-    
-    $mediumDemandCount = Subject::whereHas('demand', function($query) use ($currentPeriod, $lowDemandThreshold, $highDemandThreshold) {
-            $query->when($currentPeriod, function($q) use ($currentPeriod) {
-                $q->where('period_id', $currentPeriod->period_id);
-            })
-            ->where('student_count', '>=', $lowDemandThreshold)
-            ->where('student_count', '<', $highDemandThreshold);
-        })
-        ->when($selectedLevel, function($query) use ($selectedLevel) {
-            return $query->where('level', $selectedLevel);
-        })
-        ->count();
-    
-    $highDemandCount = Subject::whereHas('demand', function($query) use ($currentPeriod, $highDemandThreshold) {
-            $query->when($currentPeriod, function($q) use ($currentPeriod) {
-                $q->where('period_id', $currentPeriod->period_id);
-            })
-            ->where('student_count', '>=', $highDemandThreshold);
-        })
-        ->when($selectedLevel, function($query) use ($selectedLevel) {
-            return $query->where('level', $selectedLevel);
-        })
-        ->count();
-    
-    // Total de estudiantes registrados
-    $totalStudents = User::whereHas('approvedSubjects', function($query) use ($currentPeriod) {
-            $query->when($currentPeriod, function($q) use ($currentPeriod) {
-                $q->where('period_id', $currentPeriod->period_id);
-            });
-        })
-        ->orWhereHas('plannedSubjects', function($query) use ($currentPeriod) {
-            $query->when($currentPeriod, function($q) use ($currentPeriod) {
-                $q->where('period_id', $currentPeriod->period_id);
-            });
-        })
-        ->distinct()
-        ->count();
-    
-    // Demand by level data for chart
-    $demandByLevel = [];
-    foreach ($levels as $level) {
-        $demandByLevel[$level] = DB::table('subjects_demand')
-            ->join('subjects', 'subjects_demand.subject_id', '=', 'subjects.subject_id')
-            ->when($currentPeriod, function($query) use ($currentPeriod) {
-                $query->where('subjects_demand.period_id', $currentPeriod->period_id);
-            })
-            ->where('subjects.level', $level)
-            ->sum('subjects_demand.student_count');
-    }
-    
-    return view('admin.subjects.demand', compact(
-        'subjects', 
-        'levels', 
-        'selectedLevel', 
-        'currentPeriod',
-        'maxDemand',
-        'mostDemandedSubject',
-        'zeroDemandCount',
-        'lowDemandCount',
-        'mediumDemandCount',
-        'highDemandCount',
-        'totalStudents',
-        'demandByLevel',
-        'lowDemandThreshold',
-        'highDemandThreshold'
-    ));
-}
+            exec($testCommand, $output, $exitCode);
+            
+            if ($exitCode === 0) {
+                return $path;
+            }
+        }
 
-public function getSubjectStudents(Subject $subject)
-{
-    $currentPeriod = $this->getCurrentPeriod();
-    
-    $approvedStudents = $subject->approvedStudents()
-        ->when($currentPeriod, function($query) use ($currentPeriod) {
-            $query->where('period_id', $currentPeriod->period_id);
-        })
-        ->select('users.name', 'users.email', DB::raw("'approved' as type"), 'approved_subjects.registration_date')
-        ->get();
-    
-    $plannedStudents = $subject->plannedStudents()
-        ->when($currentPeriod, function($query) use ($currentPeriod) {
-            $query->where('period_id', $currentPeriod->period_id);
-        })
-        ->select('users.name', 'users.email', DB::raw("'planned' as type"), 'planned_subjects.registration_date')
-        ->get();
-    
-    $students = $approvedStudents->merge($plannedStudents);
-    
-    return response()->json($students);
-}
+        throw new \RuntimeException(
+            "No se encontró Python instalado. Rutas probadas: " . implode(', ', $possiblePaths)
+        );
+    }
     /**
-     * Obtener el período de registro actual
+     * Procesar el record académico subido
      */
-    protected function getCurrentPeriod()
+    public function processRecord(Request $request)
     {
-        return RegistrationPeriod::latest('start_date')->first();
+        $validated = $request->validate([
+            'academic_record' => 'required|mimes:pdf|max:2048',
+        ]);
+
+        $user = Auth::user();
+        
+        // Eliminar todas las asignaturas aprobadas para ese estudiante
+            DB::table('approved_subjects')
+                ->where('student_id', $user->id)
+                ->delete();
+        // Eliminar todas las asignaturas planificadas para ese estudiante
+            DB::table('planned_subjects')
+                ->where('student_id', $user->id)
+                ->delete();
+        DB::beginTransaction();
+        try {
+            // 1. Guardar el archivo en una ubicación PERSISTENTE (no temporal)
+            $path = $request->file('academic_record')->store('student_records/'.$user->id, 'public');
+            $fullPath = Storage::disk('public')->path($path);
+            
+            // 2. Ejecutar Python con la ruta persistente
+            $scriptPath = base_path('scripts/process_record.py');
+            $pythonBinary = $this->getPythonBinary();
+
+            $command = sprintf(
+                '"%s" "%s" "%s" %d',
+                $pythonBinary,
+                $scriptPath,
+                $fullPath,
+                $user->id
+            );
+
+            exec($command, $output, $returnCode);
+
+            logger()->info("Python command executed:", [
+                'command' => $command,
+                'output' => $output,
+                'exit_code' => $returnCode
+            ]);
+            
+            // 3. Eliminar el archivo SOLO después de confirmar éxito
+            if ($returnCode === 0) {
+                Storage::disk('public')->delete($path);
+                return redirect()->route('student.records.approved')
+                            ->with('success', 'Record académico procesado exitosamente');
+            } else {
+                Storage::disk('public')->delete($path); // Limpieza en caso de error
+                throw new \Exception("Error al procesar el PDF: " . implode("\n", $output));
+            }
+            DB::commit();                
+        } catch (\Exception $e) {
+            DB::rollBack();
+            if (isset($path)) {
+                Storage::disk('public')->delete($path); // Limpieza final
+            }
+            return back()->with('error', $e->getMessage())->withInput();
+        }
     }
+    /**
+     * Mostrar asignaturas aprobadas
+     */
+    public function viewApprovedSubjects(Request $request)
+    {
+        $user = Auth::user();
+        
+        $query = DB::table('approved_subjects')
+            ->where('student_id', $user->id)
+            ->join('subjects', 'approved_subjects.subject_id', '=', 'subjects.subject_id')
+            ->join('registration_periods', 'approved_subjects.period_id', '=', 'registration_periods.period_id')
+            ->select(
+                'subjects.name',
+                'subjects.code',
+                'subjects.credits',
+                'registration_periods.code as period_code',
+                'approved_subjects.registration_date',
+                'registration_periods.period_id'
+            )
+            ->orderBy('approved_subjects.registration_date', 'desc');
+
+        // Aplicar filtro por período si existe
+        if ($request->has('period_filter') && $request->period_filter) {
+            $query->where('registration_periods.period_id', $request->period_filter);
+        }
+
+        $approvedSubjects = $query->paginate(10);
+
+        // Calcular total de créditos (filtrados o no)
+        $totalCredits = $query->sum('subjects.credits');
+
+        // Obtener todos los períodos para el filtro
+        $periods = RegistrationPeriod::orderBy('start_date', 'desc')->get();
+
+        return view('student.records.approved', [
+            'approvedSubjects' => $approvedSubjects,
+            'totalCredits' => $totalCredits,
+            'periods' => $periods
+        ]);
+    }
+   
 }
