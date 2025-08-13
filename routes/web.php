@@ -2,10 +2,15 @@
 
 use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\StudentController;
-use App\Http\Controllers\AdminController;
+use App\Http\Controllers\Student\DashboardController;
+use App\Http\Controllers\Student\RecordController;
+use App\Http\Controllers\Student\EnrollmentController;
+use App\Http\Controllers\Admin\DashboardController as AdminDashboardController;
+use App\Http\Controllers\Admin\PeriodController;
+use App\Http\Controllers\Admin\SubjectController;
+
 Route::get('/', function () {
-    return view('welcome');
+    return redirect()->route('login'); // Redirige a la ruta de login de Laravel
 });
 
 Route::get('/dashboard', function () {
@@ -19,34 +24,32 @@ Route::middleware('auth')->group(function () {
 });
 
 Route::middleware(['auth', 'verified', 'role:student'])->prefix('student')->name('student.')->group(function () {
-    // Dashboard
-    Route::get('/dashboard', [StudentController::class, 'dashboard'])->name('dashboard');
+    // Dashboard - Usando DashboardController
+    Route::get('/dashboard', [DashboardController::class, 'dashboard'])->name('dashboard');
     
-    // Grupo para gestión de records académicos
-    Route::prefix('records')->name('records.')->group(function() {
-        Route::get('/upload', [StudentController::class, 'showUploadRecordForm'])->name('upload');
-        Route::post('/process', [StudentController::class, 'processRecord'])->name('process');
-        Route::get('/approved', [StudentController::class, 'viewApprovedSubjects'])->name('approved');
+    // Grupo para gestión de records académicos - Usando RecordController
+    Route::prefix('records')->name('records.')->controller(RecordController::class)->group(function() {
+        Route::get('/upload', 'showUploadRecordForm')->name('upload');
+        Route::post('/process', 'processRecord')->name('process');
+        Route::get('/approved', 'viewApprovedSubjects')->name('approved');
     });
     
-    // Grupo para prematrícula
-    Route::prefix('pre-enrollment')->name('pre-enrollment.')->group(function() {
-        Route::get('/', [StudentController::class, 'showAvailableSubjects'])->name('plan');
-        Route::post('/process', [StudentController::class, 'processPreEnrollment'])->name('process');
-        Route::delete('/planned-subject/{subject}', [StudentController::class, 'removePlannedSubject'])
-            ->name('remove-planned-subject');
+    // Grupo para prematrícula - Usando EnrollmentController
+    Route::prefix('pre-enrollment')->name('pre-enrollment.')->controller(EnrollmentController::class)->group(function() {
+        Route::get('/', 'showAvailableSubjects')->name('plan');
+        Route::post('/process', 'processPreEnrollment')->name('process');
+        Route::delete('/planned-subject/{subject}', 'removePlannedSubject')->name('remove-planned-subject');
     });
 });
 
 Route::middleware(['auth', 'verified', 'role:admin'])->prefix('admin')->name('admin.')->group(function () {
-        
     // Dashboard
-    Route::get('/dashboard', [AdminController::class, 'dashboard'])->name('dashboard');
+    Route::get('/dashboard', [AdminDashboardController::class, 'dashboard'])->name('dashboard');
     
     // Períodos académicos (controlador dedicado)
     Route::prefix('periods')
         ->name('periods.')
-        ->controller(AdminController::class) // Especifica el controlador aquí
+        ->controller(PeriodController::class)
         ->group(function() {
             Route::get('/', 'index')->name('index');
             Route::get('/create', 'create')->name('create');
@@ -55,10 +58,14 @@ Route::middleware(['auth', 'verified', 'role:admin'])->prefix('admin')->name('ad
             Route::put('/{period}', 'update')->name('update');
             Route::delete('/{period}', 'destroy')->name('destroy');
         });
+
+    // Asignaturas (controlador dedicado)
     Route::prefix('subjects')
-    ->name('subjects.')
-    ->group(function() {
-        Route::get('/demand', [AdminController::class, 'subjectsDemand'])->name('demand');
-    });
+        ->name('subjects.')
+        ->controller(SubjectController::class)
+        ->group(function() {
+            Route::get('/demand', 'subjectsDemand')->name('demand');
+        });
 });
+
 require __DIR__.'/auth.php';
